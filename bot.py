@@ -5,11 +5,9 @@ Author: MiniMax Agent
 """
 
 import os
-import json
 import logging
-from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from flask import Flask, request, jsonify
+import httpx
 
 # ============== CONFIGURATION ==============
 BOT_TOKEN = "8983707516:AAFKyeq4KLUikh2wI_J2H_yDWQvJqUoKLBY"
@@ -21,98 +19,14 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ============== TELEGRAM HANDLERS ==============
+# Global bot instance
+telegram_api = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command"""
-    welcome_message = """
-📊 *مرحباً بك في بوت SPX500 Alerts!*
-
-✅ البوت يتابع استراتيجيتك على:
-• SPX500
-• فريم الساعة
-• الدعم والمقاومة + 100 EMA
-
-🔔 *طريقة العمل:*
-اربط التنبيهات من TradingView بالبوت
-وسيصلك إشعار فوري لكل إشارة
-
-📈 *أنواع الإشارات:*
-• 🔴 انعكاس من مقاومة
-• 🟢 انعكاس من دعم
-• ⬆️ اختراق صعودي
-• ⬇️ اختراق هبوطي
-
-للتحقق من حالة البوت اكتب /status
-"""
-    await update.message.reply_text(welcome_message, parse_mode='Markdown')
-
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /status command"""
-    status_message = """
-✅ *حالة البوت: يعمل بشكل طبيعي*
-
-📊 SPX500 Strategy Monitor
-⏰ Timeframe: 1H
-📍 Indicators: S/R + 100 EMA
-
-🔗 TradingView Webhook متصل
-📨 التنبيهات نشطة
-"""
-    await update.message.reply_text(status_message, parse_mode='Markdown')
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /help command"""
-    help_message = """
-📖 *دليل الاستخدام*
-
-*الإعدادات المطلوبة:*
-1. افتح TradingView
-2. أضف المؤشرات للاستراتيجية
-3. أنشئ تنبيه مع Webhook URL
-
-*Webhook URL:*
-`https://your-render-url.onrender.com/webhook`
-
-*للحصول على رابط Webhook:*
-انشر البوت على Render/Railway ثم استخدم الرابط
-
-*الأوامر المتاحة:*
-/start - بدء البوت
-/status - حالة البوت
-/help - هذا الدليل
-/test - إرسال تنبيه تجريبي
-"""
-    await update.message.reply_text(help_message, parse_mode='Markdown')
-
-
-async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /test command - send a test alert"""
-    test_alert = format_alert_message(
-        signal_type="TEST",
-        price=4500.50,
-        level=4500,
-        level_type="RESISTANCE",
-        ema_distance=5.2,
-        strength="TEST",
-        timestamp="2024-01-15 09:30:00"
-    )
-
-    keyboard = [
-        [InlineKeyboardButton("🟢 CALL", callback_data="action_CALL"),
-         InlineKeyboardButton("🔴 PUT", callback_data="action_PUT")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(test_alert, parse_mode='Markdown', reply_markup=reply_markup)
-
+# ============== MESSAGE FORMATTING ==============
 
 def format_alert_message(signal_type, price, level, level_type, ema_distance, strength, timestamp):
     """Format the alert message with emojis and styling"""
 
-    # Determine emoji and color based on signal type
     if signal_type == "REVERSAL_BEARISH":
         emoji = "🔴"
         title = "🔥 انعكاس هبوطي محتمل"
@@ -129,13 +43,16 @@ def format_alert_message(signal_type, price, level, level_type, ema_distance, st
         emoji = "⬇️"
         title = "📉 اختراق هبوطي!"
         action = "🔴 PUT"
+    elif signal_type == "TEST":
+        emoji = "🧪"
+        title = "🧪 تنبيه تجريبي"
+        action = "اضغط زر للتأكيد"
     else:
         emoji = "⚠️"
         title = "إشارة غير معروفة"
         action = "تحقق من الاستراتيجية"
 
-    message = f"""
-{emoji} *{title}*
+    message = f"""{emoji} *{title}*
 
 ━━━━━━━━━━━━━━━━━━━━
 📍 *SPX500 - فريم الساعة*
@@ -157,31 +74,48 @@ def format_alert_message(signal_type, price, level, level_type, ema_distance, st
     return message
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle regular messages"""
-    await update.message.reply_text(
-        "📩 تم استلام رسالتك!\n"
-        "للتحقق من حالة البوت اكتب /status\n"
-        "لإرسال تنبيه تجريبي اكتب /test"
-    )
+# ============== TELEGRAM FUNCTIONS ==============
+
+def send_telegram_message(text, chat_id=CHAT_ID):
+    """Send message to Telegram"""
+    url = f"{telegram_api}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    try:
+        response = httpx.post(url, json=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
+        return {"ok": False, "error": str(e)}
 
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle callback queries from inline buttons"""
-    query = update.callback_query
-    await query.answer()
+def send_telegram_with_buttons(text, chat_id=CHAT_ID):
+    """Send message with inline buttons"""
+    url = f"{telegram_api}/sendMessage"
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "🟢 CALL", "callback_data": "action_CALL"},
+             {"text": "🔴 PUT", "callback_data": "action_PUT"}]
+        ]
+    }
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "reply_markup": keyboard
+    }
+    try:
+        response = httpx.post(url, json=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
+        return {"ok": False, "error": str(e)}
 
-    action = query.data.replace("action_", "")
 
-    if action == "CALL":
-        response = "🟢 تم اختيار CALL\nانتبه: هذا اختيارك الشخصي ولا يُعتبر نصيحة تداول!"
-    else:
-        response = "🔴 تم اختيار PUT\nانتبه: هذا اختيارك الشخصي ولا يُعتبر نصيحة تداول!"
-
-    await query.edit_message_text(text=query.message.text + f"\n\n✅ {response}")
-
-
-# ============== WEBHOOK HANDLER ==============
+# ============== WEBHOOK HANDLERS ==============
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -191,7 +125,6 @@ def webhook():
         logger.info(f"Received webhook: {data}")
 
         if data:
-            # Extract data from TradingView alert
             signal_type = data.get('signal_type', 'UNKNOWN')
             price = data.get('price', 0)
             level = data.get('level', 0)
@@ -200,7 +133,6 @@ def webhook():
             strength = data.get('strength', 'MEDIUM')
             timestamp = data.get('time', 'Unknown')
 
-            # Format message
             message = format_alert_message(
                 signal_type=signal_type,
                 price=price,
@@ -211,60 +143,81 @@ def webhook():
                 timestamp=timestamp
             )
 
-            # Create inline buttons
-            keyboard = [
-                [InlineKeyboardButton("🟢 CALL", callback_data="action_CALL"),
-                 InlineKeyboardButton("🔴 PUT", callback_data="action_PUT")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            result = send_telegram_with_buttons(message)
+            logger.info(f"Telegram API response: {result}")
 
-            # Send to Telegram
-            application.bot.send_message(
-                chat_id=CHAT_ID,
-                text=message,
-                parse_mode='Markdown',
-                reply_markup=reply_markup
-            )
+            return jsonify({"status": "success", "sent": True}), 200
 
-            return {'status': 'success'}, 200
     except Exception as e:
         logger.error(f"Error processing webhook: {e}")
-        return {'status': 'error', 'message': str(e)}, 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-    return {'status': 'no_data'}, 400
+    return jsonify({"status": "no_data"}), 400
 
 
 @app.route('/')
 def index():
     """Health check endpoint"""
-    return {'status': 'Bot is running', 'strategy': 'SPX500 S/R + 100 EMA'}
+    return jsonify({
+        "status": "Bot is running",
+        "strategy": "SPX500 S/R + 100 EMA",
+        "chat_id": CHAT_ID,
+        "version": "1.0"
+    })
+
+
+@app.route('/test')
+def test_endpoint():
+    """Test endpoint - sends a test alert"""
+    message = format_alert_message(
+        signal_type="TEST",
+        price=4500.50,
+        level=4500,
+        level_type="RESISTANCE",
+        ema_distance=5.2,
+        strength="اختبار",
+        timestamp="2024-01-15 09:30:00"
+    )
+
+    result = send_telegram_with_buttons(message)
+    return jsonify({
+        "status": "test_sent",
+        "telegram_response": result
+    })
+
+
+@app.route('/setwebhook', methods=['GET'])
+def set_webhook():
+    """Set webhook for Telegram bot"""
+    webhook_url = os.environ.get('WEBHOOK_URL', '')
+    if not webhook_url:
+        return jsonify({"error": "WEBHOOK_URL not set"}), 400
+
+    url = f"{telegram_api}/setWebhook"
+    payload = {"url": webhook_url}
+
+    try:
+        response = httpx.post(url, json=payload, timeout=10)
+        return jsonify(response.json())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/getwebhookinfo', methods=['GET'])
+def get_webhook_info():
+    """Get current webhook info"""
+    url = f"{telegram_api}/getWebhookInfo"
+
+    try:
+        response = httpx.get(url, timeout=10)
+        return jsonify(response.json())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ============== MAIN ==============
 
-def main():
-    """Start the bot"""
-    global application
-
-    # Create application
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # Add handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("test", test_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(button_callback))
-
-    # Run webhook mode (for production)
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get('PORT', 5000)),
-        url_path="webhook",
-        webhook_url=os.environ.get('WEBHOOK_URL', '')
-    )
-
-
 if __name__ == '__main__':
-    main()
+    port = int(os.environ.get('PORT', 5000))
+    logger.info(f"Starting bot on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
